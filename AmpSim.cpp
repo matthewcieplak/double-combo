@@ -33,7 +33,7 @@ static Overdrive Drive;
 static DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dlyl;
 static DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dlyr;
 
-float knob_gain, knob_volume, knob_treble, knob_mid_gain, knob_bass, knob_color, knob_fx_dry_wet, knob_fx_feedback, knob_fx_time, knob_fx_tone;
+float knob_gain, knob_volume, knob_treble, knob_mid_gain, knob_bass, knob_color, knob_fx_dry_wet, knob_fx_feedback, knob_fx_time, knob_fx_tone, ctrl_blend;
 int16_t  knob_mid_freq;
 
 Switch button_link, button_blend, button_fx; // button_stereo, button_cv;
@@ -49,11 +49,17 @@ Oscillator time_osc;
 
 bool state_link, state_blend, state_fx, state_stereo, state_cv, state_stereo_button, state_cv_button;
 
-float maxDelay, currentDelay, feedback, delayTarget, cutoff, dryWet[5];
+float maxDelay, currentDelay, feedback, delayTarget, cutoff, drive_compensation;
 
 
 void GetReverbSample(float &inl, float &inr);
 void GetDelaySample(float &inl, float &inr);
+void process_eq_mid(float &f1, float &f2);
+void process_eq_bass(float &f1, float &f2);
+void process_eq_treble(float &f1, float &f2);
+void process_eq_color(float &f1, float &f2);
+void process_drive(float &f1, float &f2);
+void process_amp_sim(float &f1, float &f2);
 void process_fx(float &f1, float &f2);
 
 
@@ -61,66 +67,36 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 {
 	for (size_t i = 0; i < size; i++)
 	{
-		float f1, f2;
-		MidBandPass.SetFreq(knob_mid_freq);
-		MidBandPass.SetRes(abs(knob_mid_gain) * 0.5);
-		MidBandPass.Process(in[0][i]);
-		if (state_stereo_button) 
-			MidBandPass.Process(in[1][i]);
+		float f1, f2, f3, f4;
 
-		f1 = MidBandPass.Band() * knob_mid_gain * 2.0 + in[0][i]; //add bandpass to dry signal in +/- to act as peak or dip
-		if (state_stereo_button) 
-			f2 = MidBandPass.Band() * knob_mid_gain * 2.0 + in[1][i]; //add bandpass to dry signal in +/- to act as peak or dip
+		f1 = in[0][i];
+		f2 = in[1][i];
 
-		Drive.SetDrive(knob_gain);
-		f1 = Drive.Process(f1);
-		if (state_stereo_button) 
-			f1 = Drive.Process(f1);
+		process_eq_mid(f1, f2);
 
+		f3 = f1;
+		f4 = f2;
 
-		TrebleBandPass.SetRes(0.2);
-		TrebleBandPass.SetFreq(3500);
-		TrebleBandPass.Process(f1);
-		TrebleBandPass.Process(f2);
-		f1 = (TrebleBandPass.High() * knob_treble * 2.0) + f1;
-		if (state_stereo_button) 
-			f2 = (TrebleBandPass.High() * knob_treble * 2.0) + f2;
+		process_drive(f1, f2);
 
+		process_amp_sim(f1, f2);
 
-		
-		BassLowPass.SetRes(0.2);
-		BassLowPass.SetFreq(300); //(bassValue + 0.5) * 10000);
-		BassLowPass.Process(f1);
-		f1 = BassLowPass.Low() * knob_bass * 2.0 + f1;
-		if (state_stereo_button) 
-			f2 = BassLowPass.Low() * knob_bass * 2.0 + f2;
-		// f2 = (f2 * bassValue);// - f1;
+		f1 = ctrl_blend * (f1 * drive_compensation) + ((1.0-ctrl_blend) * f3); //blend in clean signal
+		if (state_stereo)
+			f2 = ctrl_blend * (f2 * drive_compensation) + ((1.0-ctrl_blend) * f4);
 
-		// AmpLowPass.SetRes(0.2);
-		AmpLowPass.SetFrequency(4100); //(bassValue + 0.5) * 10000);
-		f1 = AmpLowPass.Process(f1);
-		if (state_stereo_button) 
-			f2 = AmpLowPass.Process(f2);
+		process_eq_treble(f1, f2);
+
+		process_eq_bass(f1, f2);
+
+		process_eq_color(f1, f2);
 		
 
-		AmpBandPass.SetRes(0.05);
-		AmpBandPass.SetDrive(0.2);
-		AmpBandPass.SetFreq(680);
-		AmpBandPass.Process(f1);
-		f1 = AmpBandPass.Band() * -0.8 + f1;
-		if (state_stereo_button) 
-			f2 = AmpBandPass.Band() * -0.8 + f2;
-
-		f1 = f1 * knob_volume * 1.2;
-		if (!state_stereo_button) 
-			f2 = f2 * knob_volume * 1.2;
-
-			
+		// f1 = f1 * knob_volume * 1.2;
+		// if (!state_stereo) 
+		// 	f2 = f2 * knob_volume * 1.2;
 
 
-		// AmpBandPass.Process(f2);
-		// f1 = AmpBandPass.Band() * -1.0 + f2;
-		// f2 = AmpLowPass.Process(f1);
 
 		// uncomment for audio passthrough test
 		// out[0][i] = in[0][i];
@@ -134,9 +110,79 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 }
 
+void process_eq_mid(float &f1, float &f2){
+	MidBandPass.SetFreq(knob_mid_freq);
+	MidBandPass.SetRes(abs(knob_mid_gain) * 0.5);
+	MidBandPass.Process(f1);
+
+	f1 = MidBandPass.Band() * knob_mid_gain * 2.0 + f1; //add bandpass to dry signal in +/- to act as peak or dip
+	if (state_stereo) {
+		MidBandPass.Process(f2);
+		f2 = MidBandPass.Band() * knob_mid_gain * 2.0 + f2; //add bandpass to dry signal in +/- to act as peak or dip
+	}
+}
+
+void process_eq_bass(float &f1, float &f2){
+	BassLowPass.SetRes(0.2);
+	BassLowPass.SetFreq(300); //(bassValue + 0.5) * 10000);
+	BassLowPass.Process(f1);
+	f1 = BassLowPass.Low() * knob_bass * 2.0 + f1;
+	if (state_stereo) {
+		BassLowPass.Process(f2);
+		f2 = BassLowPass.Low() * knob_bass * 2.0 + f2;
+	}
+	// f2 = (f2 * bassValue);// - f1;
+}
+
+void process_eq_treble(float &f1, float &f2){
+	TrebleBandPass.SetRes(0.2);
+	TrebleBandPass.SetFreq(3500);
+	TrebleBandPass.Process(f1);
+	f1 = (TrebleBandPass.High() * knob_treble * 2.0) + f1;
+	if (state_stereo) {
+		TrebleBandPass.Process(f2);
+		f2 = (TrebleBandPass.High() * knob_treble * 2.0) + f2;
+	}
+}
+
+
+void process_amp_sim(float &f1, float &f2){
+	// AmpLowPass.SetRes(0.2);
+	AmpLowPass.SetFrequency(4100); //(bassValue + 0.5) * 10000);
+	f1 = AmpLowPass.Process(f1);
+	if (state_stereo) 
+		f2 = AmpLowPass.Process(f2);
+	
+
+	AmpBandPass.SetRes(0.05);
+	AmpBandPass.SetDrive(0.2);
+	AmpBandPass.SetFreq(680);
+	AmpBandPass.Process(f1);
+	f1 = AmpBandPass.Band() * -0.8 + f1;
+	if (state_stereo) {
+		AmpBandPass.Process(f2);
+		f2 = AmpBandPass.Band() * -0.8 + f2;
+	}
+	// AmpBandPass.Process(f2);
+		// f1 = AmpBandPass.Band() * -1.0 + f2;
+		// f2 = AmpLowPass.Process(f1);
+}
+
+void process_eq_color(float &f1, float &f2){
+
+}
+
+void process_drive(float &f1, float &f2){
+	Drive.SetDrive(knob_gain*0.95 + 0.05);
+	drive_compensation = (2.0-knob_gain) * 0.5;
+	f1 = Drive.Process(f1);
+	if (state_stereo) 
+		f2 = Drive.Process(f2);
+}
+
 void process_fx(float &f1, float &f2) {
-	float verbl = f2 * knob_fx_dry_wet;
-	float verbr = f1 * knob_fx_dry_wet;
+	float verbl = f1 * knob_fx_dry_wet;
+	float verbr = f2 * knob_fx_dry_wet;
 	
 	if (!state_stereo_button)
 		f1 = f1 * (1.0 - knob_fx_dry_wet);
@@ -148,7 +194,7 @@ void process_fx(float &f1, float &f2) {
 		GetDelaySample(verbl, verbr);
 	}
 
-	if (!state_stereo_button)
+	if (!state_stereo)
 		f1 += verbl;
 	f2 += verbr;
 }
@@ -185,6 +231,7 @@ int main(void)
 	led_stereo.Write(true);
 	state_fx = false;
 	state_stereo = true;
+	ctrl_blend = 1.0;
 
 	// Set up the LED PWM oscillator
 	time_osc.Init(hw.AudioSampleRate());
@@ -234,7 +281,7 @@ void readButtons(){
 	}	
 
 	//button_stereo and button_cv use gate_in object and need special handling for toggle and state
-	if ((button_stereo.State() != state_stereo_button)) {
+	if ((button_stereo.State() && state_stereo_button == false)) {
 		state_stereo_button = button_stereo.State();
 		if (state_stereo_button == true) {
 			state_stereo = !state_stereo;
@@ -242,6 +289,8 @@ void readButtons(){
 			led_split.Write(!state_stereo);
 		}
 	}
+	state_stereo_button = button_stereo.State();
+
 
 
 	if (button_cv.State() != state_cv_button) {
@@ -257,7 +306,13 @@ void readKnobs(){
 	hw.ProcessDigitalControls();
 
 	knob_gain     = hw.GetAdcValue(ADC_9); // gainValue    = hw.adc.GetFloat(gainKnob);
-	knob_volume   = hw.GetAdcValue(CV_2); //.5; //hw.adc.GetFloat(volumeKnob);
+
+	if (state_blend) {
+		ctrl_blend  = hw.GetAdcValue(CV_2); //.5; //hw.adc.GetFloat(volumeKnob);
+	} else {
+		knob_volume = hw.GetAdcValue(CV_2); //.5; //hw.adc.GetFloat(volumeKnob);
+	}
+	
 	knob_treble   = hw.GetAdcValue(ADC_10) - 0.25; //hw.adc.GetFloat(trebleKnob) - 0.25;
 	knob_mid_freq = hw.GetAdcValue(CV_4) * 4000 + 170; //hw.adc.GetFloat(midFreqKnob) * 4000.0 + 170;
 	knob_mid_gain = hw.GetAdcValue(CV_5) - 0.25; //hw.adc.GetFloat(midGainKnob) - 0.25;
@@ -316,8 +371,8 @@ void setFilterConstants(float sample_rate){
     //delay parameters
     maxDelay = delayTarget = sample_rate * 0.75f;
 	currentDelay = maxDelay;
-    dlyl.SetDelay(currentDelay);
-    dlyr.SetDelay(currentDelay);
+    dlyl.SetDelay(currentDelay+ 10);
+    dlyr.SetDelay(currentDelay+ 10);
 }
 
 void GetReverbSample(float &inl, float &inr)
