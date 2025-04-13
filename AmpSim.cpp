@@ -184,9 +184,9 @@ void process_fx(float &f1, float &f2) {
 	float verbl = f1 * knob_fx_dry_wet;
 	float verbr = f2 * knob_fx_dry_wet;
 	
-	if (!state_stereo_button)
-		f1 = f1 * (1.0 - knob_fx_dry_wet);
-	f2 = f2 * (1.0 - knob_fx_dry_wet);
+	if (!state_stereo)
+		f1 = f1 * (1.0 - knob_fx_dry_wet*knob_fx_dry_wet);
+	f2 = f2 * (1.0 - knob_fx_dry_wet*knob_fx_dry_wet);
 	
 	if (state_fx) {		
 		GetReverbSample(verbl, verbr);
@@ -277,7 +277,7 @@ void readButtons(){
 		state_fx = !state_fx; //True = delay active
 		led_delay.Write(!state_fx);
 		led_reverb.Write(state_fx);
-		led_time.Write(state_stereo);// todo convert to pwm pulse
+		// led_time.Write(state_stereo);// todo convert to pwm pulse
 	}	
 
 	//button_stereo and button_cv use gate_in object and need special handling for toggle and state
@@ -387,10 +387,11 @@ void GetDelaySample(float &inl, float &inr)
     dlyr.SetDelay(currentDelay);
     float outl = dlyl.Read();
     float outr = dlyr.Read();
+	
 
     dlyl.Write((knob_fx_feedback * outl) + inl);
-    inl = (knob_fx_feedback * outl) + ((1.0f - knob_fx_feedback) * inl);
+    inl = outl + inl; //(knob_fx_feedback * outl) + ((1.0f - knob_fx_feedback) * inl);
 
     dlyr.Write((knob_fx_feedback * outr) + inr);
-    inr = (knob_fx_feedback * outr) + ((1.0f - knob_fx_feedback) * inr);
+    inr = outr + inr; //(knob_fx_feedback * outr) + ((1.0f - knob_fx_feedback) * inr);
 }
