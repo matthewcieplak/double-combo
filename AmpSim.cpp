@@ -9,6 +9,9 @@
 #define BUTTON_SAMPLE_RATE 100
 #define TIME_LED_BRIGHTNESS 0.6
 
+// Set max delay time to 0.75 of samplerate.
+#define MAX_DELAY static_cast<size_t>(48000 * 2.5f)
+
 using namespace daisy;
 // using namespace daisy::seed;
 using namespace patch_sm;
@@ -26,6 +29,10 @@ static Svf    TrebleBandPass;
 static Svf    MidBandPass;
 static Overdrive Drive;
 
+// static ReverbSc rev;
+static DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dlyl;
+static DelayLine<float, MAX_DELAY> DSY_SDRAM_BSS dlyr;
+
 float knob_gain, knob_volume, knob_treble, knob_mid_gain, knob_bass, knob_color, knob_fx_dry_wet, knob_fx_feedback, knob_fx_time, knob_fx_tone;
 int16_t  knob_mid_freq;
 
@@ -35,13 +42,19 @@ GPIO led_link, led_blend, led_delay, led_reverb, led_split, led_stereo, led_time
 
 Led led_time_pwm;
 
-bool state_link, state_blend, state_fx, state_stereo, state_cv, state_stereo_button, state_cv_button;
 
 GateIn button_stereo, button_cv;
 
 Oscillator time_osc;
 
+bool state_link, state_blend, state_fx, state_stereo, state_cv, state_stereo_button, state_cv_button;
 
+float maxDelay, currentDelay, feedback, delayTarget, cutoff, dryWet[5];
+
+
+void GetReverbSample(float &inl, float &inr);
+void GetDelaySample(float &inl, float &inr);
+void process_fx(float &f1, float &f2);
 
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
@@ -52,38 +65,58 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		MidBandPass.SetFreq(knob_mid_freq);
 		MidBandPass.SetRes(abs(knob_mid_gain) * 0.5);
 		MidBandPass.Process(in[0][i]);
+		if (state_stereo_button) 
+			MidBandPass.Process(in[1][i]);
+
 		f1 = MidBandPass.Band() * knob_mid_gain * 2.0 + in[0][i]; //add bandpass to dry signal in +/- to act as peak or dip
+		if (state_stereo_button) 
+			f2 = MidBandPass.Band() * knob_mid_gain * 2.0 + in[1][i]; //add bandpass to dry signal in +/- to act as peak or dip
 
 		Drive.SetDrive(knob_gain);
-		f2 = Drive.Process(f1);
-
+		f1 = Drive.Process(f1);
+		if (state_stereo_button) 
+			f1 = Drive.Process(f1);
 
 
 		TrebleBandPass.SetRes(0.2);
 		TrebleBandPass.SetFreq(3500);
+		TrebleBandPass.Process(f1);
 		TrebleBandPass.Process(f2);
-		f1 = (TrebleBandPass.High() * knob_treble * 2.0) + f2;
+		f1 = (TrebleBandPass.High() * knob_treble * 2.0) + f1;
+		if (state_stereo_button) 
+			f2 = (TrebleBandPass.High() * knob_treble * 2.0) + f2;
 
 
 		
 		BassLowPass.SetRes(0.2);
 		BassLowPass.SetFreq(300); //(bassValue + 0.5) * 10000);
 		BassLowPass.Process(f1);
-		f2 = BassLowPass.Low() * knob_bass * 2.0 + f1;
+		f1 = BassLowPass.Low() * knob_bass * 2.0 + f1;
+		if (state_stereo_button) 
+			f2 = BassLowPass.Low() * knob_bass * 2.0 + f2;
 		// f2 = (f2 * bassValue);// - f1;
 
 		// AmpLowPass.SetRes(0.2);
 		AmpLowPass.SetFrequency(4100); //(bassValue + 0.5) * 10000);
-		f1 = AmpLowPass.Process(f2);
+		f1 = AmpLowPass.Process(f1);
+		if (state_stereo_button) 
+			f2 = AmpLowPass.Process(f2);
+		
 
 		AmpBandPass.SetRes(0.05);
 		AmpBandPass.SetDrive(0.2);
 		AmpBandPass.SetFreq(680);
 		AmpBandPass.Process(f1);
-		f2 = AmpBandPass.Band() * -0.8 + f1;
-		
-		out[0][i] = f2 * knob_volume * 1.2;
-		out[1][i] = f2 * knob_volume * 1.2;
+		f1 = AmpBandPass.Band() * -0.8 + f1;
+		if (state_stereo_button) 
+			f2 = AmpBandPass.Band() * -0.8 + f2;
+
+		f1 = f1 * knob_volume * 1.2;
+		if (!state_stereo_button) 
+			f2 = f2 * knob_volume * 1.2;
+
+			
+
 
 		// AmpBandPass.Process(f2);
 		// f1 = AmpBandPass.Band() * -1.0 + f2;
@@ -92,7 +125,32 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		// uncomment for audio passthrough test
 		// out[0][i] = in[0][i];
 		// out[1][i] = in[1][i];
+
+		process_fx(f1, f2);
+
+
+		out[0][i] = f1;
+		out[1][i] = f2;
 	}
+}
+
+void process_fx(float &f1, float &f2) {
+	float verbl = f2 * knob_fx_dry_wet;
+	float verbr = f1 * knob_fx_dry_wet;
+	
+	if (!state_stereo_button)
+		f1 = f1 * (1.0 - knob_fx_dry_wet);
+	f2 = f2 * (1.0 - knob_fx_dry_wet);
+	
+	if (state_fx) {		
+		GetReverbSample(verbl, verbr);
+	} else { 
+		GetDelaySample(verbl, verbr);
+	}
+
+	if (!state_stereo_button)
+		f1 += verbl;
+	f2 += verbr;
 }
 
 void setFilterConstants(float sample_rate);
@@ -141,6 +199,7 @@ int main(void)
 	hw.SetAudioBlockSize(4); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	hw.StartAudio(AudioCallback);
+	
 
 
 	while(1) {
@@ -210,6 +269,8 @@ void readKnobs(){
 	knob_fx_feedback = hw.GetAdcValue(CV_7);
 	knob_fx_tone     = hw.GetAdcValue(CV_8);
 
+	currentDelay = maxDelay * knob_fx_time;
+
 	time_osc.SetFreq(3.0 * (1.0 - knob_fx_time) + 0.1);
 	
 	led_time_pwm.Set((time_osc.Process() + 0.6) * TIME_LED_BRIGHTNESS);
@@ -243,4 +304,38 @@ void setFilterConstants(float sample_rate){
 
 	Drive.SetDrive(0.2);
 	Drive.Init();
+
+	// rev.Init(sample_rate);
+    dlyl.Init();
+    dlyr.Init();
+
+    //reverb parameters
+    // rev.SetLpFreq(18000.0f);
+    // rev.SetFeedback(0.85f);
+
+    //delay parameters
+    maxDelay = delayTarget = sample_rate * 0.75f;
+	currentDelay = maxDelay;
+    dlyl.SetDelay(currentDelay);
+    dlyr.SetDelay(currentDelay);
+}
+
+void GetReverbSample(float &inl, float &inr)
+{
+    // rev.Process(inl, inr, &inl, &inr);
+}
+
+void GetDelaySample(float &inl, float &inr)
+{
+    fonepole(currentDelay, delayTarget, .00007f);
+    dlyl.SetDelay(currentDelay);
+    dlyr.SetDelay(currentDelay);
+    float outl = dlyl.Read();
+    float outr = dlyr.Read();
+
+    dlyl.Write((knob_fx_feedback * outl) + inl);
+    inl = (knob_fx_feedback * outl) + ((1.0f - knob_fx_feedback) * inl);
+
+    dlyr.Write((knob_fx_feedback * outr) + inr);
+    inr = (knob_fx_feedback * outr) + ((1.0f - knob_fx_feedback) * inr);
 }
